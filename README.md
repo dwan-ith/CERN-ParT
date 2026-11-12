@@ -1,4 +1,4 @@
-# CERN Particle Transformer (ParT) Foundation Model
+# CERN Particle Transformer (ParT) Model
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
@@ -12,7 +12,7 @@ The entire ~404M parameter model is engineered to train and evaluate on consumer
 
 ---
 
-## ⚡ Key Highlights
+## Key Highlights
 
 * **XRootD-Free Remote Streaming**: Directly streams CMS NanoAOD ROOT trees over HTTPS into Awkward arrays and PyTorch tensors. Zero terabyte downloads, zero EOS setup, 100% native on Windows, Linux, and macOS.
 * **Kinematic Interaction Bias**: Implements pairwise particle attention biases based on Minkowski spacetime and jet clustering metrics ($\Delta R$, $k_T$, $z$, $\Delta m$), reflecting the physical geometry of particle showers.
@@ -21,7 +21,7 @@ The entire ~404M parameter model is engineered to train and evaluate on consumer
 
 ---
 
-## 🧠 Architecture Overview
+## Architecture Overview
 
 ```
                                CMS Collision Event
@@ -72,7 +72,7 @@ Covering Muons, Electrons, Photons, Jets, and Taus from CMS NanoAOD trees.
 
 ---
 
-## 📊 Hardware & Memory Budget
+## Hardware & Memory Budget
 
 Targeted for consumer hardware (e.g. laptop GPUs with 6 GB VRAM) while maintaining full foundation model capacity:
 
@@ -89,7 +89,7 @@ Targeted for consumer hardware (e.g. laptop GPUs with 6 GB VRAM) while maintaini
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 .
@@ -115,15 +115,15 @@ Targeted for consumer hardware (e.g. laptop GPUs with 6 GB VRAM) while maintaini
 
 ---
 
-## 🚀 Quickstart
+## Quickstart
 
 ### 1. Installation
 
 Clone the repository and install dependencies:
 
 ```bash
-git clone https://github.com/<your-username>/cern-particle-transformer.git
-cd cern-particle-transformer
+git clone https://github.com/dwan-ith/CERN-ParT.git
+cd CERN-ParT
 pip install -r requirements.txt
 pip install -e .
 ```
@@ -174,7 +174,7 @@ python -m cern_ai.train --n_steps 5000 --batch_size 16 --lr 3e-4 --mask_ratio 0.
 
 ---
 
-## 💾 Model Checkpoints
+## Model Checkpoints
 
 Due to GitHub's 100 MB file size limit, model weights (`*.pt`, ~1.64 GB) are excluded from this git repository. 
 
@@ -182,13 +182,13 @@ To host or download pre-trained weights:
 1. Create a repository on [Hugging Face Model Hub](https://huggingface.co/new).
 2. Upload `checkpoints/final.pt` using the Hugging Face CLI:
    ```bash
-   huggingface-cli upload <your-username>/cern-particle-transformer checkpoints/final.pt final.pt
+   huggingface-cli upload dwan-ith/CERN-ParT checkpoints/final.pt final.pt
    ```
 3. Place downloaded checkpoints in the local `checkpoints/` directory.
 
 ---
 
-## 🔬 Dataset & Scientific References
+## Dataset & Scientific References
 
 * **Dataset**: CMS Collaboration. Open Data from the CMS experiment at the LHC. Derived dataset: NanoAOD Run 1 (2010–2012 collision datasets). Available via the [CERN Open Data Portal](https://opendata.cern.ch/).
 * **Particle Transformer Architecture**:
@@ -198,6 +198,7 @@ To host or download pre-trained weights:
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the [MIT License](LICENSE).
+

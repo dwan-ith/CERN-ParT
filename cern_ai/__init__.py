@@ -1,21 +1,17 @@
-"""
-CERN AI: Particle Transformer (ParT) Foundation Model for CMS NanoAOD
+"""Particle Transformer for CMS NanoAOD.
+
+A compact, from-scratch implementation of the ParT architecture
+(arXiv:2206.11833) that streams CMS open data over plain HTTP and trains on
+a single consumer GPU.
+
+Quick start::
+
+    pip install -e .
+    python -m cern_ai.generate_urls
+    python -m cern_ai.train --preset base --n-steps 5000
+    python -m cern_ai.evaluate --checkpoint checkpoints/final.pt
 """
 
-from .model.particle_transformer import ParticleTransformer
-from .model.pretraining_head import MaskedParticleModeling
-from .model.config import ModelConfig, TrainingConfig, DataConfig
-from .data.https_dataset import CMSNanoAODDataset, create_dataloader
-from .data.feature_extractor import extract_batch, get_required_branches
+__version__ = "0.2.0"
 
-__all__ = [
-    "ParticleTransformer",
-    "MaskedParticleModeling",
-    "ModelConfig",
-    "TrainingConfig",
-    "DataConfig",
-    "CMSNanoAODDataset",
-    "create_dataloader",
-    "extract_batch",
-    "get_required_branches",
-]
+__all__ = ["__version__"]

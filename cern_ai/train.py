@@ -1,137 +1,314 @@
-"""
-Training loop for CERN Foundation Model (Particle Transformer).
-Streams CMS NanoAOD via HTTPS, trains with Masked Particle Modeling.
+"""Pretraining loop for the Particle Transformer.
 
-RTX 4050 6GB settings:
-    d_model=128, n_layers=4, batch_size=16, AMP=True
+Run it with::
 
-Usage:
-    python -m cern_ai.train
-    python -m cern_ai.train --n_steps 5000 --lr 5e-4
+    python -m cern_ai.train --preset base --n-steps 5000
+    python -m cern_ai.train --preset base --resume checkpoints/step_005000.pt
+
+The loop is written so that it can be interrupted at any point: checkpoints
+are written atomically and contain the optimizer state, so ``--resume``
+continues a run rather than restarting it.
 """
+from __future__ import annotations
+
 import argparse
+import json
+import math
 import os
+import random
 import time
+from typing import Any, Dict, List, Optional
+
+import numpy as np
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 
-from .model.config import ModelConfig, TrainingConfig, DataConfig
+from .checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint, write_run_config
+from .data.https_dataset import CMSNanoAODDataset
+from .model.config import (
+    DataConfig,
+    ModelConfig,
+    TrainingConfig,
+    cosine_lr,
+    count_parameters,
+    estimate_memory,
+    model_config,
+)
 from .model.particle_transformer import ParticleTransformer
 from .model.pretraining_head import MaskedParticleModeling
-from .data.https_dataset import CMSNanoAODDataset
 
 
-def get_device():
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+def get_device() -> torch.device:
     if torch.cuda.is_available():
-        dev = torch.device("cuda")
-        print(f"[device] {torch.cuda.get_device_name(0)} — "
-              f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-    else:
-        dev = torch.device("cpu")
-        print("[device] CPU (no CUDA)")
-    return dev
+        name = torch.cuda.get_device_name(0)
+        total = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"[device] {name} — {total:.1f} GB")
+        return torch.device("cuda")
+    print("[device] CPU (no CUDA available)")
+    return torch.device("cpu")
 
 
-def get_lr(step, warmup, total, base_lr):
-    if step < warmup:
-        return base_lr * step / max(warmup, 1)
-    progress = (step - warmup) / max(total - warmup, 1)
-    return base_lr * 0.5 * (1 + torch.cos(torch.tensor(progress * 3.14159)).item())
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
-def save_checkpoint(model, head, optimizer, scaler, step, loss, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    # Save model + head only (optimizer ~2GB for 259M params, skip to save disk)
-    torch.save({
-        "step": step,
-        "model": model.state_dict(),
-        "head": head.state_dict(),
-        "loss": loss,
-    }, path)
+def build_optimizer(
+    parameters, cfg: TrainingConfig, name: str = "adamw"
+) -> torch.optim.Optimizer:
+    """Create the optimizer.
+
+    ``adamw8bit`` keeps the optimizer state at one byte per moment, which is
+    what makes the larger presets fit on a 6 GB card.  If ``bitsandbytes`` is
+    not installed we fall back to regular AdamW and say so.
+    """
+    if name == "adamw":
+        return torch.optim.AdamW(
+            parameters, lr=cfg.lr, weight_decay=cfg.weight_decay, betas=(0.9, 0.95)
+        )
+    if name == "adamw8bit":
+        try:
+            import bitsandbytes as bnb  # type: ignore
+
+            return bnb.optim.AdamW8bit(
+                parameters, lr=cfg.lr, weight_decay=cfg.weight_decay, betas=(0.9, 0.95)
+            )
+        except Exception as exc:  # pragma: no cover - optional dependency
+            print(f"[warn] adamw8bit unavailable ({exc}); falling back to adamw")
+            return torch.optim.AdamW(
+                parameters, lr=cfg.lr, weight_decay=cfg.weight_decay, betas=(0.9, 0.95)
+            )
+    if name == "sgd":
+        return torch.optim.SGD(
+            parameters, lr=cfg.lr, momentum=0.9, weight_decay=cfg.weight_decay
+        )
+    raise KeyError(f"unknown optimizer {name!r}")
 
 
-def train(args=None):
-    if args is None:
-        args = parse_args()
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+def resolve_urls(args: argparse.Namespace, data_cfg: DataConfig) -> List[str]:
+    if args.urls:
+        return [u.strip() for u in args.urls.split(",") if u.strip()]
+    if args.url_file:
+        with open(args.url_file, "r", encoding="utf-8") as handle:
+            return [line.strip() for line in handle if line.strip() and not line.startswith("#")]
+    if not data_cfg.default_urls:
+        raise SystemExit(
+            "no URLs given: pass --urls or --url-file, or generate "
+            "cern_ai/data/all_urls.txt with `python -m cern_ai.generate_urls`"
+        )
+    return list(data_cfg.default_urls)
 
-    model_cfg = ModelConfig()
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def evaluate_pretraining_loss(
+    model: ParticleTransformer,
+    head: MaskedParticleModeling,
+    dataset,
+    device: torch.device,
+    n_batches: int = 20,
+    mask_ratio: float = 0.15,
+    seed: int = 1234,
+) -> float:
+    """Masked-particle-modelling loss on a held-out stream.
+
+    The masking RNG is re-seeded for every batch so that the number is
+    comparable between evaluations.
+    """
+    was_training = model.training
+    model.eval()
+    head.eval()
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
+
+    total = 0.0
+    count = 0
+    for i, batch in enumerate(dataset):
+        if i >= n_batches:
+            break
+        particles = batch["particles"].to(device)
+        mask = batch["mask"].to(device)
+        loss, _, _ = head(particles, mask, model, mask_ratio, generator=generator)
+        total += float(loss.item())
+        count += 1
+
+    if was_training:
+        model.train()
+        head.train()
+    return total / max(count, 1)
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+def train(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
+    args = args or parse_args()
+
+    model_cfg = model_config(args.preset)
     train_cfg = TrainingConfig()
     data_cfg = DataConfig()
 
-    if args:
-        train_cfg.n_steps = args.n_steps
-        train_cfg.batch_size = args.batch_size
-        train_cfg.lr = args.lr
-        train_cfg.mask_ratio = args.mask_ratio
+    train_cfg.n_steps = args.n_steps
+    train_cfg.batch_size = args.batch_size
+    train_cfg.lr = args.lr
+    train_cfg.min_lr = args.min_lr
+    train_cfg.mask_ratio = args.mask_ratio
+    train_cfg.mask_strategy = args.mask_strategy
+    train_cfg.grad_accum = args.grad_accum
+    train_cfg.max_particles = args.max_particles
+    train_cfg.warmup_steps = args.warmup_steps
+    train_cfg.save_every = args.save_every
+    train_cfg.log_every = args.log_every
+    train_cfg.checkpoint_dir = args.out_dir
+    train_cfg.amp = args.amp and not args.no_amp
+    train_cfg.seed = args.seed
 
+    if args.no_interaction:
+        model_cfg.use_interaction_bias = False
+
+    set_seed(train_cfg.seed)
     device = get_device()
 
-    # --- Model ---
-    model = ParticleTransformer(cfg=model_cfg).to(device)
-    head = MaskedParticleModeling(d_model=model_cfg.d_model,
-                                  n_features=model_cfg.n_features).to(device)
+    # --- Model ---------------------------------------------------------
+    model = ParticleTransformer(cfg=model_cfg, mask_strategy=train_cfg.mask_strategy).to(device)
+    head = MaskedParticleModeling(
+        d_model=model_cfg.d_model,
+        n_features=model_cfg.n_features,
+        hidden_channels=train_cfg.masked_channels,
+    ).to(device)
 
-    n_params = model.count_parameters() + sum(p.numel() for p in head.parameters() if p.requires_grad)
-    print(f"[model] {n_params / 1e6:.2f}M parameters")
+    n_params = model.count_parameters() + sum(
+        p.numel() for p in head.parameters() if p.requires_grad
+    )
+    print(f"[model] preset={args.preset} params={n_params / 1e6:.2f}M")
 
-    # --- Optimizer ---
-    optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(head.parameters()),
-        lr=train_cfg.lr,
-        weight_decay=train_cfg.weight_decay,
+    # --- Memory budget -------------------------------------------------
+    memory = estimate_memory(model_cfg, train_cfg, optimizer=args.optimizer, n_params=n_params)
+    print(
+        f"[memory] estimated peak {memory['total']:.2f} GB "
+        f"(params {memory['params']:.2f} + grads {memory['grads']:.2f} + "
+        f"optim {memory['optimizer']:.2f} + act {memory['activations']:.2f})"
+    )
+    if device.type == "cuda":
+        capacity = torch.cuda.get_device_properties(0).total_memory / 1e9
+        if memory["total"] > capacity * 0.95:
+            print(
+                f"[warn] estimated peak exceeds {capacity:.1f} GB of VRAM; "
+                "consider a smaller --preset, --no-amp or --optimizer adamw8bit"
+            )
+
+    # --- Optimizer -----------------------------------------------------
+    optimizer = build_optimizer(
+        list(model.parameters()) + list(head.parameters()), train_cfg, args.optimizer
+    )
+    scaler = (
+        torch.amp.GradScaler("cuda")
+        if (train_cfg.amp and device.type == "cuda")
+        else None
     )
 
-    scaler = torch.amp.GradScaler("cuda") if (train_cfg.amp and device.type == "cuda") else None
-
-    # --- Data ---
-    urls = data_cfg.default_urls
-    if args and args.urls:
-        urls = args.urls.split(",")
+    # --- Data ----------------------------------------------------------
+    urls = resolve_urls(args, data_cfg)
+    if args.max_files:
+        urls = urls[: args.max_files]
     dataset = CMSNanoAODDataset(
         urls,
         max_particles=train_cfg.max_particles,
         batch_size=train_cfg.batch_size,
         shuffle=True,
+        shuffle_buffer=args.shuffle_buffer,
+        tree=data_cfg.tree,
+        seed=train_cfg.seed,
     )
 
-    # --- Training ---
-    print(f"[train] Streaming from {len(urls)} file(s), "
-          f"{train_cfg.n_steps} steps, batch={train_cfg.batch_size}")
+    # --- Resume --------------------------------------------------------
+    start_step = 0
+    if args.resume:
+        path = args.resume if args.resume != "auto" else latest_checkpoint(train_cfg.checkpoint_dir)
+        if path and os.path.exists(path):
+            payload = load_checkpoint(
+                path,
+                model=model,
+                head=head,
+                optimizer=optimizer,
+                scaler=scaler,
+                map_location=str(device),
+            )
+            start_step = int(payload.get("step", 0))
+            print(f"[resume] {path} -> continuing at step {start_step}")
+        else:
+            print(f"[resume] no checkpoint found at {args.resume!r}; starting fresh")
+
+    run_config = {
+        "args": {k: v for k, v in vars(args).items()},
+        "model": model_cfg.to_dict(),
+        "training": train_cfg.to_dict(),
+        "memory_estimate_gb": memory,
+        "n_params": n_params,
+        "n_urls": len(urls),
+    }
+    write_run_config(os.path.join(train_cfg.checkpoint_dir, "run_config.json"), run_config)
+
+    # --- Loop ----------------------------------------------------------
+    print(
+        f"[train] {len(urls)} files, {train_cfg.n_steps} optimizer steps, "
+        f"batch={train_cfg.batch_size} x accum={train_cfg.grad_accum}, "
+        f"mask={train_cfg.mask_ratio:.0%} ({train_cfg.mask_strategy})"
+    )
 
     model.train()
     head.train()
-    step = 0
-    running_loss = 0.0
+    optimizer_step = start_step
+    micro_step = 0
+    running = 0.0
+    running_count = 0
     t0 = time.time()
+    last_log_loss = float("nan")
 
-    while step < train_cfg.n_steps:
+    while optimizer_step < train_cfg.n_steps:
         for batch in dataset:
-            if step >= train_cfg.n_steps:
+            if optimizer_step >= train_cfg.n_steps:
                 break
 
-            particles = batch["particles"].to(device)
-            mask = batch["mask"].to(device)
+            particles = batch["particles"].to(device, non_blocking=True)
+            mask = batch["mask"].to(device, non_blocking=True)
 
-            # LR schedule
-            lr = get_lr(step, train_cfg.warmup_steps, train_cfg.n_steps, train_cfg.lr)
-            for pg in optimizer.param_groups:
-                pg["lr"] = lr
+            lr = cosine_lr(
+                optimizer_step,
+                train_cfg.warmup_steps,
+                train_cfg.n_steps,
+                train_cfg.lr,
+                train_cfg.min_lr,
+            )
+            for group in optimizer.param_groups:
+                group["lr"] = lr
 
-            # Forward + backward
             if scaler is not None:
                 with torch.amp.autocast("cuda"):
-                    loss, preds, is_masked = head(particles, mask, model, train_cfg.mask_ratio)
-                if is_masked.sum() > 0:
-                    scaler.scale(loss / train_cfg.grad_accum).backward()
+                    loss, _, is_masked = head(
+                        particles, mask, model, train_cfg.mask_ratio
+                    )
+                scaler.scale(loss / train_cfg.grad_accum).backward()
             else:
-                loss, preds, is_masked = head(particles, mask, model, train_cfg.mask_ratio)
-                if is_masked.sum() > 0:
-                    (loss / train_cfg.grad_accum).backward()
+                loss, _, is_masked = head(particles, mask, model, train_cfg.mask_ratio)
+                (loss / train_cfg.grad_accum).backward()
 
-            running_loss += loss.item()
+            running += float(loss.item())
+            running_count += 1
+            micro_step += 1
 
-            if (step + 1) % train_cfg.grad_accum == 0:
+            if micro_step % train_cfg.grad_accum == 0:
                 if scaler is not None:
                     scaler.unscale_(optimizer)
                     nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -140,47 +317,109 @@ def train(args=None):
                 else:
                     nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     optimizer.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
+                optimizer_step += 1
 
-            # Logging
-            if (step + 1) % train_cfg.log_every == 0:
-                elapsed = time.time() - t0
-                avg_loss = running_loss / train_cfg.log_every
-                events_per_sec = (train_cfg.log_every * train_cfg.batch_size) / max(elapsed, 1e-6)
-                mask_frac = is_masked.float().mean().item() if is_masked is not None else 0
-                print(f"  step {step+1:>6d}/{train_cfg.n_steps} | "
-                      f"loss {avg_loss:.4f} | "
-                      f"mask {mask_frac:.2%} | "
-                      f"{events_per_sec:.0f} evt/s | "
-                      f"lr {lr:.2e}")
-                running_loss = 0.0
-                t0 = time.time()
+                if optimizer_step % train_cfg.log_every == 0:
+                    elapsed = max(time.time() - t0, 1e-6)
+                    avg_loss = running / max(running_count, 1)
+                    last_log_loss = avg_loss
+                    events = train_cfg.batch_size * train_cfg.grad_accum * running_count
+                    mask_frac = float(is_masked.float().mean().item())
+                    print(
+                        f"  step {optimizer_step:>6d}/{train_cfg.n_steps} | "
+                        f"loss {avg_loss:.4f} | mask {mask_frac:.3f} | "
+                        f"{events / elapsed:.1f} evt/s | lr {lr:.2e}"
+                    )
+                    running = 0.0
+                    running_count = 0
+                    t0 = time.time()
 
-            # Checkpoint
-            if (step + 1) % train_cfg.save_every == 0:
-                ckpt_path = os.path.join(train_cfg.checkpoint_dir, f"step_{step+1:06d}.pt")
-                save_checkpoint(model, head, optimizer, scaler, step + 1, avg_loss, ckpt_path)
-                print(f"  [saved] {ckpt_path}")
+                if optimizer_step % train_cfg.save_every == 0:
+                    path = os.path.join(
+                        train_cfg.checkpoint_dir, f"step_{optimizer_step:06d}.pt"
+                    )
+                    save_checkpoint(
+                        path,
+                        step=optimizer_step,
+                        model=model,
+                        head=head,
+                        optimizer=optimizer,
+                        scaler=scaler,
+                        loss=last_log_loss,
+                        model_config=model_cfg.to_dict(),
+                        training_config=train_cfg.to_dict(),
+                        save_optimizer=not args.no_save_optimizer,
+                    )
+                    print(f"  [saved] {path}")
 
-            step += 1
-
-    # Final save
+    # --- Final checkpoint ----------------------------------------------
     final_path = os.path.join(train_cfg.checkpoint_dir, "final.pt")
-    save_checkpoint(model, head, optimizer, scaler, step, running_loss, final_path)
-    print(f"[done] {step} steps, final checkpoint: {final_path}")
+    save_checkpoint(
+        final_path,
+        step=optimizer_step,
+        model=model,
+        head=head,
+        optimizer=optimizer,
+        scaler=scaler,
+        loss=last_log_loss,
+        model_config=model_cfg.to_dict(),
+        training_config=train_cfg.to_dict(),
+        save_optimizer=not args.no_save_optimizer,
+    )
+    stats = dict(dataset.stats)
+    stats["particles_per_event"] = (
+        stats.get("particles", 0.0) / stats["events"] if stats.get("events") else 0.0
+    )
+    print(f"[done] {optimizer_step} steps | final checkpoint: {final_path}")
+    print(f"[stats] events={int(stats.get('events', 0))} "
+          f"particles/event={stats['particles_per_event']:.2f}")
+    return {"model": model, "head": head, "step": optimizer_step, "stats": stats}
 
-    return model, head
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train CERN Particle Transformer")
-    parser.add_argument("--n_steps", type=int, default=2000)
-    parser.add_argument("--batch_size", type=int, default=16)
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Pretrain the Particle Transformer with masked particle modelling"
+    )
+    parser.add_argument("--preset", default="base", help="model preset (see config.py)")
+    parser.add_argument("--n-steps", type=int, default=5000)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--mask_ratio", type=float, default=0.15)
-    parser.add_argument("--urls", type=str, default="",
-                        help="Comma-separated list of ROOT file URLs")
-    return parser.parse_args()
+    parser.add_argument("--min-lr", type=float, default=3e-5)
+    parser.add_argument("--warmup-steps", type=int, default=200)
+    parser.add_argument("--mask-ratio", type=float, default=0.15)
+    parser.add_argument(
+        "--mask-strategy", default="kinematic", choices=["kinematic", "full"]
+    )
+    parser.add_argument("--max-particles", type=int, default=64)
+    parser.add_argument("--shuffle-buffer", type=int, default=2000)
+    parser.add_argument("--log-every", type=int, default=50)
+    parser.add_argument("--save-every", type=int, default=500)
+    parser.add_argument("--out-dir", default="checkpoints")
+    parser.add_argument("--urls", default="", help="comma-separated list of ROOT file URLs")
+    parser.add_argument("--url-file", default="", help="file with one URL per line")
+    parser.add_argument("--max-files", type=int, default=0, help="only use the first N files")
+    parser.add_argument("--optimizer", default="adamw", choices=["adamw", "adamw8bit", "sgd"])
+    parser.add_argument("--no-save-optimizer", action="store_true")
+    parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument("--no-interaction", action="store_true", help="ablate the ParT interaction bias")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="auto",
+        default=None,
+        help="resume from this checkpoint (default: the latest in --out-dir)",
+    )
+    return parser
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
 
 
 if __name__ == "__main__":

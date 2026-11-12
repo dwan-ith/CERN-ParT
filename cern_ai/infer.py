@@ -87,3 +87,4 @@ if __name__ == "__main__":
                         help="Path to PyTorch checkpoint file")
     args = parser.parse_args()
     run_demo(args.checkpoint)
+
