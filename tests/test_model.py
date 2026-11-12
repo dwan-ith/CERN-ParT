@@ -6,14 +6,10 @@ import math
 import numpy as np
 import pytest
 import torch
-import torch.nn.functional as F
 
 from model.config import (
     CH_ETA,
-    CH_MASS,
     CH_PT,
-    MASK_CHANNELS,
-    N_MODEL_FEATURES,
     count_parameters,
     model_config,
 )
@@ -306,7 +302,6 @@ def test_pretraining_loss_backward_works_without_masked_particles():
 def test_pretraining_target_is_the_true_normalised_value():
     cfg = model_config("tiny")
     model = ParticleTransformer(cfg=cfg)
-    head = MaskedParticleModeling(d_model=cfg.d_model, n_features=cfg.n_features)
     particles, mask = _make_particles()
     target = model.normalizer(particles, None)
     assert target.shape == (*particles.shape[:2], cfg.n_features)

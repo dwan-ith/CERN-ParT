@@ -58,10 +58,7 @@ from .config import (
     CH_PT,
     CH_SINPHI,
     CH_TYPE0,
-    IX_DM,
     IX_DR,
-    IX_KT,
-    IX_Z,
     MASK_CHANNELS,
     N_MODEL_FEATURES,
     N_RAW_FEATURES,
@@ -119,7 +116,6 @@ class FeatureNormalizer(nn.Module):
         eta = particles[..., 1]
         phi = particles[..., 2]
         mass = particles[..., 3].clamp(min=0.0)
-        charge = particles[..., 4]
         type_id = particles[..., 5]
 
         feats = particles.new_zeros(*particles.shape[:-1], self.n_features)

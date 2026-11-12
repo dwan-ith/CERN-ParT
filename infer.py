@@ -1,100 +1,189 @@
-"""
-Inference and Feature Extraction Demo for CERN Particle Transformer.
+"""Inference demo: event embeddings and masked-particle reconstruction.
 
-Runs inference on streamed CMS NanoAOD collision events or synthetic particles,
-extracts high-dimensional event representations ([CLS] embeddings), and performs
-Masked Particle Modeling (MPM) reconstruction.
+Two demonstrations:
 
-Usage:
-    python infer.py
+1. a **synthetic** batch, so the script runs without network access;
+2. a **real** event streamed from CERN Open Data, if a URL is given.
+
+Usage::
+
+    python infer.py                                   # synthetic demo
     python infer.py --checkpoint checkpoints/final.pt
+    python infer.py --url-file data/btag_val.txt      # stream real events
 """
+from __future__ import annotations
 
 import argparse
 import os
+from typing import Dict, List, Optional, Tuple
+
 import torch
 
-from model.config import ModelConfig, N_MODEL_FEATURES, N_RAW_FEATURES
+from data.https_dataset import CMSNanoAODDataset
+from model.config import N_RAW_FEATURES, ModelConfig, model_config
 from model.particle_transformer import ParticleTransformer
 from model.pretraining_head import MaskedParticleModeling
-from data.https_dataset import CMSNanoAODDataset
 
 
-def load_model(checkpoint_path=None, device="cpu"):
-    cfg = ModelConfig()
+def _synthetic_particles(batch: int = 2, n: int = 16, seed: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Physically plausible random particles.
+
+    The raw layout is ``[pt, eta, phi, mass, charge, type_id]`` with
+    ``type_id`` indexing ``model.config.OBJECT_TYPES``.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    pt = torch.rand(batch, n, generator=generator) * 150 + 0.5
+    eta = torch.rand(batch, n, generator=generator) * 6 - 3
+    phi = torch.rand(batch, n, generator=generator) * 2 * torch.pi - torch.pi
+    mass = torch.rand(batch, n, generator=generator) * 5
+    charge = torch.randint(-1, 2, (batch, n), generator=generator).float()
+    type_id = torch.randint(0, 5, (batch, n), generator=generator).float()
+    particles = torch.stack([pt, eta, phi, mass, charge, type_id], dim=-1)
+    mask = torch.ones(batch, n)
+    mask[:, -3:] = 0.0  # three padding slots
+    return particles, mask
+
+
+def load_model(
+    checkpoint_path: Optional[str] = None,
+    device: str = "cpu",
+    preset: str = "base",
+):
+    """Build the model, restoring the architecture stored in the checkpoint.
+
+    Checkpoints written by this repository embed their ``model_config``; when
+    one is present it is used, so that a checkpoint always comes back with the
+    architecture it was trained with.
+    """
+    cfg: ModelConfig = model_config(preset)
+    mask_strategy = "kinematic"
+    payload: Dict = {}
 
     if checkpoint_path and os.path.exists(checkpoint_path):
-        print(f"[infer] Loading checkpoint: {checkpoint_path}")
-        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        if "model_config" in ckpt and ckpt["model_config"]:
-            try:
-                cfg = ModelConfig(**ckpt["model_config"])
-            except Exception:
-                pass
-        model = ParticleTransformer(cfg=cfg).to(device)
-        head = MaskedParticleModeling(d_model=cfg.d_model, n_features=N_MODEL_FEATURES).to(device)
-        try:
-            model.load_state_dict(ckpt["model"])
-            head.load_state_dict(ckpt["head"])
-            step = ckpt.get("step", "unknown")
-            loss = ckpt.get("loss", "unknown")
-            print(f"[infer] Checkpoint loaded (Step: {step}, Loss: {loss})")
-        except Exception as e:
-            print(f"[infer] Note: Checkpoint architecture differs ({e}). Initialized fresh weights.")
+        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        stored = payload.get("model_config") or {}
+        if stored:
+            cfg = ModelConfig.from_dict(stored)
+        training = payload.get("training_config") or {}
+        mask_strategy = training.get("mask_strategy", mask_strategy)
+        print(
+            f"[infer] checkpoint {checkpoint_path}: step {payload.get('step', '?')}, "
+            f"loss {payload.get('loss', float('nan')):.4f}, "
+            f"d_model {cfg.d_model}, layers {cfg.n_layers}"
+        )
     else:
-        model = ParticleTransformer(cfg=cfg).to(device)
-        head = MaskedParticleModeling(d_model=cfg.d_model, n_features=N_MODEL_FEATURES).to(device)
-        print("[infer] Initializing model with uncheckpointed weights (architecture demo mode)")
+        print(
+            f"[infer] no checkpoint given -- running a randomly initialised "
+            f"'{preset}' model (architecture demo mode)"
+        )
+
+    model = ParticleTransformer(cfg=cfg, mask_strategy=mask_strategy).to(device)
+    head = MaskedParticleModeling(
+        d_model=cfg.d_model,
+        n_features=cfg.n_features,
+        hidden_channels=model.normalizer.masked_channel_mask.nonzero().flatten().tolist(),
+    ).to(device)
+
+    if payload:
+        missing, unexpected = model.load_state_dict(payload["model"], strict=False)
+        if missing or unexpected:
+            print(
+                f"[infer] warning: {len(missing)} missing and "
+                f"{len(unexpected)} unexpected keys -- the checkpoint does not "
+                "match this architecture exactly"
+            )
+        if "head" in payload:
+            head.load_state_dict(payload["head"], strict=False)
 
     model.eval()
     head.eval()
     return model, head, cfg
 
 
-def run_demo(checkpoint_path=None):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[infer] Running inference on device: {device}")
+def run_demo(
+    checkpoint_path: Optional[str] = None,
+    url_file: Optional[str] = None,
+    device: Optional[str] = None,
+) -> None:
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"[infer] device: {device}")
 
     model, head, cfg = load_model(checkpoint_path, device=device)
 
-    # Demo 1: Synthetic batch with particle candidates
-    print("\n" + "=" * 60)
-    print("DEMO 1: Forward Pass & Event Embeddings")
-    print("=" * 60)
+    print("\n" + "=" * 62)
+    print("DEMO 1: forward pass and event embeddings")
+    print("=" * 62)
 
-    B, N, F = 2, 8, N_RAW_FEATURES
-    dummy_particles = torch.randn(B, N, F, device=device)
-    dummy_mask = torch.ones(B, N, device=device)
-    dummy_mask[:, -2:] = 0.0  # 2 padding particles
+    particles, mask = _synthetic_particles()
+    particles = particles.to(device)
+    mask = mask.to(device)
 
     with torch.no_grad():
-        cls_out, particle_out = model(dummy_particles, dummy_mask)
+        cls_out, particle_out = model(particles, mask)
 
-    print(f"Input batch shape:       {dummy_particles.shape} (B={B}, Particles={N}, Features={F})")
-    print(f"Event embedding [CLS]:   {cls_out.shape} -> Suitable for downstream Jet/Event classification")
-    print(f"Per-particle embeddings: {particle_out.shape} -> Suitable for constituent tagging")
+    print(f"input particles:       {tuple(particles.shape)}  (B, N, {N_RAW_FEATURES})")
+    print(f"event embedding [CLS]: {tuple(cls_out.shape)}  -- one vector per event")
+    print(f"particle embeddings:   {tuple(particle_out.shape)}  -- one vector per particle")
 
-    # Demo 2: Masked Particle Reconstruction
-    print("\n" + "=" * 60)
-    print("DEMO 2: Masked Particle Modeling (MPM) Reconstruction")
-    print("=" * 60)
-
+    print("\n" + "=" * 62)
+    print("DEMO 2: masked particle reconstruction")
+    print("=" * 62)
     with torch.no_grad():
-        loss, preds, is_masked = head(dummy_particles, dummy_mask, model, mask_ratio=0.25)
+        loss, preds, is_masked = head(particles, mask, model, mask_ratio=0.25)
+    print(f"masked particles:      {int(is_masked.sum())} / {particles.shape[0] * particles.shape[1]}")
+    print(f"reconstruction loss:   {float(loss):.6f} (MSE on the hidden channels)")
+    print(f"predictions:           {tuple(preds.shape)}")
 
-    print(f"Masked particles count:  {is_masked.sum().item()} / {B * N}")
-    print(f"Reconstruction MSE loss: {loss.item():.4f}")
-    print(f"Predictions shape:       {preds.shape}")
+    if url_file:
+        print("\n" + "=" * 62)
+        print("DEMO 3: a real event streamed from CERN Open Data")
+        print("=" * 62)
+        urls = _read_urls(url_file)
+        if not urls:
+            print(f"[infer] no URLs in {url_file}")
+            return
+        dataset = CMSNanoAODDataset(urls[:1], max_particles=64, batch_size=4,
+                                     shuffle_buffer=0)
+        try:
+            batch = next(iter(dataset))
+        except Exception as exc:  # pragma: no cover - network dependent
+            print(f"[infer] could not stream the file: {exc}")
+            return
+        real_particles = batch["particles"].to(device)
+        real_mask = batch["mask"].to(device)
+        with torch.no_grad():
+            cls_real, particle_real = model(real_particles, real_mask)
+        n_jets = int(batch["is_jet"].sum())
+        print(f"events streamed:       {real_particles.shape[0]}")
+        print(f"particles per event:   {float(real_mask.sum(1).mean()):.2f}")
+        print(f"jets in the batch:     {n_jets}")
+        print(f"event embedding:       {tuple(cls_real.shape)}")
+        print(f"particle embeddings:   {tuple(particle_real.shape)}")
 
-    print("\n" + "=" * 60)
-    print("Inference demo completed successfully!")
-    print("=" * 60)
+    print("\n" + "=" * 62)
+    print("done")
+    print("=" * 62)
+
+
+def _read_urls(path: str) -> List[str]:
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as handle:
+        return [
+            line.strip()
+            for line in handle
+            if line.strip() and not line.startswith("#")
+        ]
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--checkpoint", default="", help="path to a checkpoint")
+    parser.add_argument("--url-file", default="", help="file with NanoAOD URLs to stream")
+    parser.add_argument("--preset", default="base", help="preset used without a checkpoint")
+    args = parser.parse_args(argv)
+    run_demo(args.checkpoint or None, args.url_file or None)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Particle Transformer Inference Demo")
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/final.pt",
-                        help="Path to PyTorch checkpoint file")
-    args = parser.parse_args()
-    run_demo(args.checkpoint)
-
+    main()

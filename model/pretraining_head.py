@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .config import CH_MASS, CH_PT, MASK_CHANNELS, N_MODEL_FEATURES
+from .config import MASK_CHANNELS, N_MODEL_FEATURES
 
 
 class MaskedParticleModeling(nn.Module):

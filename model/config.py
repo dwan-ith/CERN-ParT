@@ -128,6 +128,7 @@ MODEL_PRESETS: Dict[str, Dict[str, Any]] = {
     "tiny": dict(d_model=192, n_heads=4, n_layers=4, d_ff=768, d_interaction=64),
     "small": dict(d_model=384, n_heads=8, n_layers=8, d_ff=1536, d_interaction=96),
     "base": dict(d_model=768, n_heads=12, n_layers=12, d_ff=3072, d_interaction=128),
+    "medium": dict(d_model=1024, n_heads=16, n_layers=12, d_ff=4096, d_interaction=128),
     "large": dict(d_model=1024, n_heads=16, n_layers=24, d_ff=6144, d_interaction=128),
     # Original ParT configuration (quoted for reference; needs an A100).
     "part": dict(d_model=256, n_heads=8, n_layers=6, d_ff=1024, d_interaction=64),
@@ -289,7 +290,6 @@ def count_parameters(model_cfg: ModelConfig) -> int:
     """Parameter count of the architecture described by ``model_cfg``."""
     d = model_cfg.d_model
     ff = model_cfg.d_ff
-    h = model_cfg.n_heads
     di = model_cfg.d_interaction
     n_raw = model_cfg.n_raw_features
     n_feat = model_cfg.n_features

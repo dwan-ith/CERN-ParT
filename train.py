@@ -12,8 +12,6 @@ continues a run rather than restarting it.
 from __future__ import annotations
 
 import argparse
-import json
-import math
 import os
 import random
 import time
@@ -27,10 +25,8 @@ from checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint, writ
 from data.https_dataset import CMSNanoAODDataset
 from model.config import (
     DataConfig,
-    ModelConfig,
     TrainingConfig,
     cosine_lr,
-    count_parameters,
     estimate_memory,
     model_config,
 )
@@ -171,7 +167,7 @@ def train(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
     train_cfg.save_every = args.save_every
     train_cfg.log_every = args.log_every
     train_cfg.checkpoint_dir = args.out_dir
-    train_cfg.amp = args.amp and not args.no_amp
+    train_cfg.amp = not args.no_amp
     train_cfg.seed = args.seed
 
     if args.no_interaction:
@@ -230,7 +226,34 @@ def train(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
         shuffle_buffer=args.shuffle_buffer,
         tree=data_cfg.tree,
         seed=train_cfg.seed,
+        cache_dir=args.cache_dir or None,
+        download_workers=args.download_workers,
     )
+
+    # --- Optional held-out stream --------------------------------------
+    val_dataset = None
+    val_urls: List[str] = []
+    if args.val_urls:
+        val_urls = [u.strip() for u in args.val_urls.split(",") if u.strip()]
+    elif args.val_url_file:
+        with open(args.val_url_file, "r", encoding="utf-8") as handle:
+            val_urls = [
+                line.strip()
+                for line in handle
+                if line.strip() and not line.startswith("#")
+            ]
+    if val_urls and args.val_every:
+        val_dataset = CMSNanoAODDataset(
+            val_urls,
+            max_particles=train_cfg.max_particles,
+            batch_size=train_cfg.batch_size,
+            shuffle=False,
+            shuffle_buffer=0,
+            tree=data_cfg.tree,
+            seed=train_cfg.seed + 1,
+            cache_dir=args.cache_dir or None,
+        )
+        print(f"[val] {len(val_urls)} held-out file(s)")
 
     # --- Resume --------------------------------------------------------
     start_step = 0
@@ -325,7 +348,10 @@ def train(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
                     avg_loss = running / max(running_count, 1)
                     last_log_loss = avg_loss
                     events = train_cfg.batch_size * train_cfg.grad_accum * running_count
-                    mask_frac = float(is_masked.float().mean().item())
+                    # Fraction of *real* particles that were masked.  Dividing
+                    # by the padded tensor width would understate it badly.
+                    real = mask.sum().clamp(min=1.0)
+                    mask_frac = float(is_masked.sum().item() / real.item())
                     print(
                         f"  step {optimizer_step:>6d}/{train_cfg.n_steps} | "
                         f"loss {avg_loss:.4f} | mask {mask_frac:.3f} | "
@@ -352,6 +378,24 @@ def train(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
                         save_optimizer=not args.no_save_optimizer,
                     )
                     print(f"  [saved] {path}")
+
+                if (
+                    val_dataset is not None
+                    and args.val_every
+                    and optimizer_step % args.val_every == 0
+                ):
+                    val_loss = evaluate_pretraining_loss(
+                        model,
+                        head,
+                        val_dataset,
+                        device,
+                        n_batches=args.val_batches,
+                        mask_ratio=train_cfg.mask_ratio,
+                    )
+                    print(
+                        f"  [val] step {optimizer_step} | "
+                        f"masked-particle loss {val_loss:.4f}"
+                    )
 
     # --- Final checkpoint ----------------------------------------------
     final_path = os.path.join(train_cfg.checkpoint_dir, "final.pt")
@@ -396,13 +440,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--mask-strategy", default="kinematic", choices=["kinematic", "full"]
     )
     parser.add_argument("--max-particles", type=int, default=64)
-    parser.add_argument("--shuffle-buffer", type=int, default=2000)
+    parser.add_argument("--shuffle-buffer", type=int, default=512)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--out-dir", default="checkpoints")
     parser.add_argument("--urls", default="", help="comma-separated list of ROOT file URLs")
     parser.add_argument("--url-file", default="", help="file with one URL per line")
+    parser.add_argument("--val-urls", default="", help="comma-separated held-out URLs")
+    parser.add_argument("--val-url-file", default="", help="file of held-out URLs")
+    parser.add_argument("--val-every", type=int, default=0,
+                        help="evaluate on the held-out stream every N steps")
+    parser.add_argument("--val-batches", type=int, default=20)
     parser.add_argument("--max-files", type=int, default=0, help="only use the first N files")
+    parser.add_argument(
+        "--cache-dir",
+        default="",
+        help="download the files into this directory first (much faster; "
+        "ROOT files must be streamed whole over HTTP otherwise)",
+    )
+    parser.add_argument("--download-workers", type=int, default=8)
     parser.add_argument("--optimizer", default="adamw", choices=["adamw", "adamw8bit", "sgd"])
     parser.add_argument("--no-save-optimizer", action="store_true")
     parser.add_argument("--no-amp", action="store_true")

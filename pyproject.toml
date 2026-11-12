@@ -4,26 +4,61 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cern-part"
-version = "0.1.0"
-description = "Particle Transformer (ParT) Foundation Model streaming CMS NanoAOD via HTTPS"
+version = "0.2.0"
+description = "Particle Transformer (ParT) for CMS NanoAOD, streamed over HTTPS"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "dwan-ith" }]
+keywords = ["particle-transformer", "jet-tagging", "cms", "nanoaod", "cern", "hephysics"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
 dependencies = [
     "torch>=2.0.0",
     "uproot>=5.0.0",
     "awkward>=2.0.0",
     "numpy>=1.24.0",
-    "tqdm>=4.60.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    "pytest-cov>=4.0",
 ]
+# 8-bit optimizer states; required by the `large` preset on a 6 GB card.
+adamw8bit = [
+    "bitsandbytes>=0.43.0",
+]
+
+[project.scripts]
+cern-train = "train:main"
+cern-eval = "evaluate:main"
+cern-urls = "generate_urls:main"
+
+[project.urls]
+Homepage = "https://github.com/dwan-ith/CERN-ParT"
+Repository = "https://github.com/dwan-ith/CERN-ParT"
+Issues = "https://github.com/dwan-ith/CERN-ParT/issues"
+
+[tool.setuptools]
+py-modules = ["train", "evaluate", "generate_urls", "checkpoint"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["data*", "model*", "tests*"]
+include = ["data*", "model*"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: tests that stream files from CERN Open Data (deselect with -m 'not network')",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["data", "model"]
+omit = ["tests/*"]

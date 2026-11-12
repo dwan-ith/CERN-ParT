@@ -14,15 +14,328 @@ because it cannot guess.
 """
 from __future__ import annotations
 
+import hashlib
+import os
 import random
-from collections import deque
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence
+import shutil
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Iterator, List, Optional, Sequence
 
 import numpy as np
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
 
 from .feature_extractor import extract_batch, get_optional_branches, get_required_branches
+
+
+# ---------------------------------------------------------------------------
+# Local cache
+# ---------------------------------------------------------------------------
+def cache_path(cache_dir: str, url: str) -> str:
+    """Deterministic local path for a remote file."""
+    name = url.rsplit("/", 1)[-1]
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
+    return os.path.join(cache_dir, f"{digest}_{name}")
+
+
+def cached_events_path(
+    url: str,
+    cache_dir: str,
+    max_particles: int = 64,
+    use_pf_candidates: bool = True,
+) -> str:
+    """Deterministic path of the cached, extracted events for a URL."""
+    key = hashlib.sha1(
+        f"{url}|{max_particles}|{int(use_pf_candidates)}".encode("utf-8")
+    ).hexdigest()[:16]
+    return os.path.join(cache_dir, f"{key}.npz")
+
+
+def extract_and_cache(
+    url: str,
+    cache_dir: str,
+    max_particles: int = 64,
+    use_pf_candidates: bool = True,
+    tree: str = "Events",
+    step_size: int = 2000,
+    timeout: int = 600,
+) -> str:
+    """Stream a remote NanoAOD file and store the *extracted* events locally.
+
+    Caching the extracted tensors rather than the ROOT file is a much better
+    trade:
+
+    * the ROOT file is ~140 MB, the extracted events are a few MB;
+    * ``uproot`` is not needed at all on a cached re-run, so the data loader
+      stops being the bottleneck entirely;
+    * the cached artefact is independent of ROOT's tree layout.
+
+    The cache key includes the particle limit, so changing ``max_particles``
+    invalidates the cache instead of silently returning the wrong tensors.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    path = cached_events_path(url, cache_dir, max_particles, use_pf_candidates)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        return path
+
+    wanted = _branch_list(use_pf_candidates)
+    tmp = f"{path}.part.npz"
+
+    particles: List[np.ndarray] = []
+    mask: List[np.ndarray] = []
+    is_jet: List[np.ndarray] = []
+    btag: List[np.ndarray] = []
+
+    for arrays in uproot_iterate([url], tree, wanted, timeout=timeout):
+        try:
+            batch = extract_batch(
+                arrays,
+                max_particles=max_particles,
+                use_pf_candidates=use_pf_candidates,
+            )
+        except Exception as exc:  # pragma: no cover - network dependent
+            print(f"[cache] skipping a chunk of {url}: {exc}", flush=True)
+            continue
+        particles.append(batch["particles"])
+        mask.append(batch["mask"])
+        is_jet.append(batch["is_jet"])
+        btag.append(batch["btag"])
+
+    if not particles:
+        raise IOError(f"no events could be extracted from {url}")
+
+    np.savez_compressed(
+        tmp,
+        particles=np.concatenate(particles, axis=0),
+        mask=np.concatenate(mask, axis=0),
+        is_jet=np.concatenate(is_jet, axis=0),
+        btag=np.concatenate(btag, axis=0),
+    )
+    os.replace(tmp, path)
+    return path
+
+
+def _branch_list(use_pf_candidates: bool = True) -> List[str]:
+    """The branches the extractor needs, plus the optional b-tagging ones."""
+    branches = get_required_branches(use_pf_candidates)
+    branches += get_optional_branches()
+    return branches
+
+
+def content_length(url: str, timeout: int = 30) -> Optional[int]:
+    """Expected size of a remote file, or ``None`` if it cannot be determined."""
+    try:
+        request = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            length = response.headers.get("Content-Length")
+            return int(length) if length else None
+    except Exception:
+        return None
+
+
+def _looks_like_valid_root(path: str) -> bool:
+    """Check that a downloaded file really is a readable NanoAOD file.
+
+    The CERN endpoint occasionally truncates a transfer.  A truncated ROOT
+    file does not fail at download time -- it fails much later, deep inside
+    the training loop, with a confusing error.  Validating the file here
+    turns that into an immediate, actionable retry.
+    """
+    try:
+        import uproot
+
+        with uproot.open(path) as handle:
+            keys = list(handle.keys())
+        return "Events" in keys
+    except Exception:
+        return False
+
+
+def download_file(
+    url: str,
+    cache_dir: str,
+    timeout: int = 300,
+    retries: int = 4,
+    validate: bool = True,
+) -> str:
+    """Download ``url`` into ``cache_dir`` and return the local path.
+
+    ROOT files are not random-access readable over HTTP: ``uproot`` has to
+    stream the whole file even when only a handful of branches are
+    requested.  Caching the file locally therefore turns a stream-per-batch
+    workload into a stream-per-file one, and it turns a network-bound
+    pipeline into a GPU-bound one.
+
+    The CERN endpoint throttles aggressively and truncates transfers, so the
+    download is resumable (HTTP ``Range``) and the received size is compared
+    against the size the server announced.  A truncated file is otherwise
+    indistinguishable from a good one until it explodes deep inside the
+    training loop.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    path = cache_path(cache_dir, url)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        if not validate or _looks_like_valid_root(path):
+            return path
+        os.remove(path)
+
+    tmp = f"{path}.part"
+    total = 0
+
+    for attempt in range(retries):
+        have = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+        headers = {"Range": f"bytes={have}-"} if have else {}
+        try:
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                if have and getattr(response, "status", 0) == 206:
+                    content_range = response.headers.get("Content-Range", "")
+                    try:
+                        total = int(content_range.rsplit("/", 1)[-1])
+                    except (ValueError, IndexError):
+                        total = 0
+                    mode = "ab"
+                else:
+                    total = int(response.headers.get("Content-Length") or 0)
+                    mode = "wb"
+                    have = 0
+                with open(tmp, mode) as handle:
+                    shutil.copyfileobj(response, handle, length=1 << 20)
+        except Exception as exc:  # pragma: no cover - network dependent
+            print(f"[cache] transfer error ({exc}); retrying", flush=True)
+            continue
+
+        size = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+        if total and size >= total:
+            break
+        if not total and size > 0 and not validate:
+            break
+        print(
+            f"[cache] incomplete transfer ({size}/{total or '?'} bytes); resuming",
+            flush=True,
+        )
+
+    if not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
+        raise IOError(f"could not download {url}")
+
+    if validate and not _looks_like_valid_root(tmp):
+        # Keep the partial file: the next attempt resumes from here.
+        raise IOError(f"downloaded file is not a valid NanoAOD file yet: {url}")
+
+    os.replace(tmp, path)
+    return path
+
+
+class _EventCachePrefetcher:
+    """Download and extract files in the background, a bounded window ahead.
+
+    The extraction is the expensive part (it reads the remote file over
+    HTTP), so it is overlapped with the training loop: while the model is
+    working on the events of the current file, the next few files are being
+    fetched and converted.
+
+    The window is deliberately bounded.  The full manifest is 1214 files, and
+    a training run only ever touches a small fraction of them.
+    """
+
+    def __init__(
+        self,
+        urls: Sequence[str],
+        cache_dir: str,
+        max_particles: int = 64,
+        use_pf_candidates: bool = True,
+        tree: str = "Events",
+        workers: int = 2,
+        window: int = 4,
+    ) -> None:
+        self.urls = list(urls)
+        self.cache_dir = cache_dir
+        self.max_particles = max_particles
+        self.use_pf_candidates = use_pf_candidates
+        self.tree = tree
+        self.workers = max(workers, 1)
+        self.window = max(window, 1)
+
+    def _fetch(self, url: str) -> str:
+        return extract_and_cache(
+            url,
+            self.cache_dir,
+            max_particles=self.max_particles,
+            use_pf_candidates=self.use_pf_candidates,
+            tree=self.tree,
+        )
+
+    def __iter__(self) -> Iterator[str]:
+        pool = ThreadPoolExecutor(max_workers=self.workers)
+        futures: List = []
+        index = 0
+        try:
+            while index < len(self.urls) and len(futures) < self.window:
+                futures.append(pool.submit(self._fetch, self.urls[index]))
+                index += 1
+            while futures:
+                future = futures.pop(0)
+                try:
+                    local = future.result()
+                except Exception as exc:  # pragma: no cover - network dependent
+                    print(f"\n[cache] skipping file: {exc}", flush=True)
+                    local = ""
+                if index < len(self.urls):
+                    futures.append(pool.submit(self._fetch, self.urls[index]))
+                    index += 1
+                if local:
+                    yield local
+        finally:
+            pool.shutdown(wait=False)
+
+
+def materialize(
+    urls: Sequence[str],
+    cache_dir: str,
+    workers: int = 8,
+    desc: str = "downloading",
+    verbose: bool = True,
+    validate: bool = True,
+) -> List[str]:
+    """Download every URL in parallel and return the local paths."""
+    os.makedirs(cache_dir, exist_ok=True)
+    paths: List[str] = []
+    pending: List[str] = []
+    for url in urls:
+        local = cache_path(cache_dir, url)
+        if os.path.exists(local) and os.path.getsize(local) > 0:
+            paths.append(local)
+        else:
+            pending.append(url)
+
+    if not pending:
+        return paths
+
+    done = [0]
+
+    def fetch(url: str) -> str:
+        try:
+            local = download_file(url, cache_dir, validate=validate)
+        except Exception as exc:  # pragma: no cover - network dependent
+            print(f"\n[cache] FAILED {url}: {exc}", flush=True)
+            return ""
+        done[0] += 1
+        if verbose:
+            print(
+                f"\r[{desc}] {done[0]}/{len(pending)} files",
+                end="",
+                flush=True,
+            )
+        return local
+
+    with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
+        for local in pool.map(fetch, pending):
+            if local:
+                paths.append(local)
+    if verbose:
+        print()
+    return paths
 
 
 class _EventBuffer:
@@ -50,7 +363,14 @@ class _EventBuffer:
         return len(self._items)
 
     def add(self, item: Dict[str, np.ndarray]) -> Optional[Dict[str, np.ndarray]]:
-        """Add an event; return the event it displaced (if any)."""
+        """Add an event; return the event that should be emitted next.
+
+        The buffer holds a uniform random sample of the events seen so far.
+        When the new event displaces a buffered one, the *displaced* event is
+        returned; when it does not, the *new* event is returned instead.
+        Either way every event is emitted exactly once -- dropping it would
+        silently shrink the training set.
+        """
         if self.size == 0:
             return None
         self._seen += 1
@@ -62,7 +382,7 @@ class _EventBuffer:
             displaced = self._items[idx]
             self._items[idx] = item
             return displaced
-        return None
+        return item
 
     def drain(self) -> Iterator[Dict[str, np.ndarray]]:
         """Yield and remove all buffered events, in random order."""
@@ -107,6 +427,9 @@ class CMSNanoAODDataset(IterableDataset):
         use_pf_candidates: bool = True,
         max_files: Optional[int] = None,
         seed: int = 0,
+        cache_dir: Optional[str] = None,
+        download_workers: int = 4,
+        prefetch_window: int = 8,
     ) -> None:
         super().__init__()
         self.urls = list(urls)
@@ -119,6 +442,9 @@ class CMSNanoAODDataset(IterableDataset):
         self.tree = tree
         self.use_pf_candidates = use_pf_candidates
         self.seed = seed
+        self.cache_dir = cache_dir
+        self.download_workers = download_workers
+        self.prefetch_window = prefetch_window
 
         #: Running statistics, useful for sanity checks and for the README.
         self.stats: Dict[str, float] = {
@@ -151,42 +477,74 @@ class CMSNanoAODDataset(IterableDataset):
             for arrays in uproot_iterate(urls, None, wanted):
                 yield arrays
 
-    # -- iteration -------------------------------------------------------
-    def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
-        urls = self._sharded_urls()
+    def _file_source(self) -> Iterator[str]:
+        """Yield the remote files to stream, in a shuffled order."""
+        return iter(self._sharded_urls())
+
+    # -- event sources --------------------------------------------------
+    def _stream_events(self) -> Iterator[Dict[str, np.ndarray]]:
+        """Yield single events straight from the remote ROOT files."""
+        for path in self._file_source():
+            for arrays in self._iterate_files([path]):
+                self.stats["chunks"] += 1
+                try:
+                    batch = extract_batch(
+                        arrays,
+                        max_particles=self.max_particles,
+                        use_pf_candidates=self.use_pf_candidates,
+                    )
+                except Exception as exc:  # pragma: no cover - network dependent
+                    print(f"[CMSNanoAODDataset] skipping a batch: {exc}")
+                    continue
+                n_events = batch["particles"].shape[0]
+                self.stats["events"] += n_events
+                self.stats["particles"] += float(batch["n_particles"].sum())
+                for i in range(n_events):
+                    yield {key: value[i] for key, value in batch.items()}
+
+    def _cached_events(self) -> Iterator[Dict[str, np.ndarray]]:
+        """Yield single events from the locally cached extractions."""
+        urls = list(self.urls)
+        if self.shuffle:
+            random.Random(self.seed).shuffle(urls)
+        source = _EventCachePrefetcher(
+            urls,
+            self.cache_dir,
+            max_particles=self.max_particles,
+            use_pf_candidates=self.use_pf_candidates,
+            tree=self.tree,
+            workers=self.download_workers,
+            window=self.prefetch_window,
+        )
+        for path in source:
+            with np.load(path) as data:
+                # ``NpzFile`` decompresses lazily, so every key has to be
+                # materialised exactly once -- indexing it inside the event
+                # loop would re-inflate the whole array for every event.
+                arrays = {key: data[key] for key in data.files}
+                n_events = arrays["particles"].shape[0]
+                self.stats["events"] += n_events
+                self.stats["particles"] += float(arrays["mask"].sum())
+                for i in range(n_events):
+                    yield {key: value[i] for key, value in arrays.items()}
+
+    def _batched(
+        self, events: Iterator[Dict[str, np.ndarray]]
+    ) -> Iterator[Dict[str, torch.Tensor]]:
+        """Group events into batches, shuffling at the event level."""
         buffer = _EventBuffer(self.shuffle_buffer, seed=self.seed)
         pending: List[Dict[str, np.ndarray]] = []
-
-        for arrays in self._iterate_files(urls):
-            self.stats["chunks"] += 1
-            try:
-                batch = extract_batch(
-                    arrays,
-                    max_particles=self.max_particles,
-                    use_pf_candidates=self.use_pf_candidates,
-                )
-            except Exception as exc:  # pragma: no cover - network dependent
-                print(f"[CMSNanoAODDataset] skipping a batch: {exc}")
-                continue
-
-            n_events = batch["particles"].shape[0]
-            self.stats["events"] += n_events
-            self.stats["particles"] += float(batch["n_particles"].sum())
-
-            for i in range(n_events):
-                event = {key: value[i] for key, value in batch.items()}
-                if self.shuffle_buffer > 0:
-                    displaced = buffer.add(event)
-                    if displaced is None:
-                        continue
-                    pending.append(displaced)
-                else:
-                    pending.append(event)
-                if len(pending) == self.batch_size:
-                    yield _collate(pending)
-                    pending = []
-
-        # Flush whatever is left.
+        for event in events:
+            if self.shuffle_buffer > 0:
+                displaced = buffer.add(event)
+                if displaced is None:
+                    continue
+                pending.append(displaced)
+            else:
+                pending.append(event)
+            if len(pending) == self.batch_size:
+                yield _collate(pending)
+                pending = []
         if self.shuffle_buffer > 0:
             for item in buffer.drain():
                 pending.append(item)
@@ -195,6 +553,13 @@ class CMSNanoAODDataset(IterableDataset):
                     pending = []
         if pending:
             yield _collate(pending)
+
+    # -- iteration -------------------------------------------------------
+    def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
+        if self.cache_dir is not None:
+            yield from self._batched(self._cached_events())
+        else:
+            yield from self._batched(self._stream_events())
 
     def __len__(self) -> int:
         """Number of batches, estimated from the file count.
@@ -205,7 +570,12 @@ class CMSNanoAODDataset(IterableDataset):
         return max(1, len(self.urls) * 1000 // max(self.batch_size, 1))
 
 
-def uproot_iterate(urls: Sequence[str], tree: Optional[str], branches: Sequence[str]):
+def uproot_iterate(
+    urls: Sequence[str],
+    tree: Optional[str],
+    branches: Sequence[str],
+    timeout: int = 600,
+):
     """``uproot.iterate`` wrapper that pins the TTree when possible."""
     import uproot
 
@@ -213,7 +583,9 @@ def uproot_iterate(urls: Sequence[str], tree: Optional[str], branches: Sequence[
         spec = {url: tree for url in urls}
     else:
         spec = list(urls)
-    return uproot.iterate(spec, filter_name=list(branches), step_size=1000)
+    return uproot.iterate(
+        spec, filter_name=list(branches), step_size=1000, timeout=timeout
+    )
 
 
 def create_dataloader(

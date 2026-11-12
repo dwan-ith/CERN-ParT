@@ -28,6 +28,13 @@ Thumbs.db
 
 # Test and coverage caches
 .pytest_cache/
+.pytest_tmp/
 .coverage
 htmlcov/
+
+# Local cache of streamed NanoAOD files (can be 100s of GB)
+.cache/
+nanocache/
+*.root
+*.part
 

@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+title: "CERN-ParT: a Particle Transformer for CMS NanoAOD, streamed over HTTPS"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - name: "dwan-ith"
+repository-code: "https://github.com/dwan-ith/CERN-ParT"
+license: MIT
+version: "0.2.0"
+date-released: "2026-11-13"
+keywords:
+  - particle transformer
+  - jet tagging
+  - CMS
+  - NanoAOD
+  - collider physics
+  - masked modelling
+abstract: >-
+  A self-contained implementation of the Particle Transformer architecture
+  (Qu et al., arXiv:2206.11833) that streams CMS NanoAOD collision events
+  directly from CERN Open Data over plain HTTPS and trains on a single
+  consumer GPU, with a leak-free masked-particle-modelling objective.
+preferred-citation:
+  type: article
+  title: "Particle Transformer for Jet Tagging"
+  authors:
+    - family-names: Qu
+      given-names: Cong
+    - family-names: Li
+      given-names: Qing
+    - family-names: Moutinho
+      given-names: André
+    - family-names: Wang
+      given-names: Guolin
+    - family-names: Zhang
+      given-names: Hanxiao
+  journal: "arXiv:2206.11833"
+  year: 2022
+  url: "https://arxiv.org/abs/2206.11833"
