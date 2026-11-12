@@ -24,7 +24,6 @@ python evaluate.py --checkpoint checkpoints/pt_large/final.pt --mode finetune
 
 ## Contents
 
-- [Why this exists](#why-this-exists)
 - [What is implemented](#what-is-implemented)
 - [The masking problem, and how it is solved here](#the-masking-problem-and-how-it-is-solved-here)
 - [Data pipeline](#data-pipeline)
@@ -34,28 +33,6 @@ python evaluate.py --checkpoint checkpoints/pt_large/final.pt --mode finetune
 - [Limitations](#limitations)
 - [Repository layout](#repository-layout)
 - [References](#references)
-
----
-
-## Why this exists
-
-The ParT paper is a strong architecture, but reproducing it usually means building
-CERN software stacks, running a batch system over xRootD, and renting a multi-GPU
-node. This repository aims to make the same idea runnable on a laptop in ten
-minutes:
-
-| | Typical HEP ML setup | This repository |
-|---|---|---|
-| Data access | XRootD / EOS client, CVMFS | `uproot` over HTTPS |
-| Storage | TB-scale local copy | none |
-| Hardware | A100 / multi-GPU node | RTX 4050 Laptop, 6 GB VRAM |
-| Setup | CVMFS, CVMFS, conda, compilers | `pip install -r requirements.txt` |
-| Model size | unbounded | 411 M parameters on a 6 GB card |
-
-The engineering that makes this possible — 8-bit optimizer states, activation
-checkpointing, a leak-free masking scheme, and feature normalisation — is described
-below. Each of those choices is a consequence of a measurement, not a guess, and the
-measurements are in the repository as tests.
 
 ---
 
