@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch checkpoints and model weights (Hard limit on GitHub is 100MB)
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# IDEs and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Test and coverage caches
+.pytest_cache/
+.coverage
+htmlcov/

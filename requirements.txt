@@ -1,0 +1,5 @@
+torch>=2.0.0
+uproot>=5.0.0
+awkward>=2.0.0
+numpy>=1.24.0
+tqdm>=4.60.0
