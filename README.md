@@ -8,7 +8,7 @@
 
 A self-contained PyTorch foundation model for High-Energy Physics (HEP) implementing the **Particle Transformer (ParT)** architecture with **Masked Particle Modeling (MPM)**. It streams collision events directly from **CERN CMS NanoAOD Run 1 Open Data over HTTPS** using `uproot`, requiring **no local storage of terabyte ROOT files** and **no complex XRootD/EOS installation**.
 
-The entire ~404M parameter model is engineered to train and evaluate on consumer GPUs (e.g., RTX 4050 6GB) using activation gradient checkpointing and Automatic Mixed Precision (AMP).
+The entire ~404M parameter model is engineered to train and evaluate on low end GPUs using activation gradient checkpointing and Automatic Mixed Precision (AMP).
 
 ---
 
