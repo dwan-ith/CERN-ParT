@@ -24,7 +24,7 @@ for recid in RECORDS:
 
 print(f"\nTotal: {len(all_urls)} files")
 # Save to file
-with open("cern_ai/data/all_urls.txt", "w") as f:
+with open("data/all_urls.txt", "w") as f:
     for url in all_urls:
         f.write(url + "\n")
-print("Saved to cern_ai/data/all_urls.txt")
+print("Saved to data/all_urls.txt")

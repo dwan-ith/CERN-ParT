@@ -3,17 +3,20 @@ End-to-end pipeline test.
 Streams 1 CMS NanoAOD file via HTTPS, extracts features, runs model forward pass.
 
 Usage:
-    python -m cern_ai.tests.test_pipeline
+    python tests/test_pipeline.py
 """
+import os
 import sys
 import time
 import torch
 import numpy as np
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 
 def test_feature_extractor():
     """Test that feature extractor produces correct shapes."""
-    from ..data.feature_extractor import extract_batch, N_FEATURES, get_required_branches
+    from data.feature_extractor import extract_batch, N_FEATURES, get_required_branches
 
     branches = get_required_branches()
     print(f"[test] Required branches: {len(branches)}")
@@ -25,7 +28,7 @@ def test_feature_extractor():
 def test_https_streaming():
     """Test streaming 1 file via HTTPS with uproot."""
     import uproot
-    from ..data.feature_extractor import extract_batch, get_required_branches
+    from data.feature_extractor import extract_batch, get_required_branches
 
     url = "http://opendata.cern.ch/eos/opendata/cms/derived-data/NanoAODRun1/01-Jul-22/Run2010A_Mu/02A55927-7112-4A20-B06E-86E24B644B59.root"
     print(f"[test] Opening {url}")
@@ -47,7 +50,7 @@ def test_https_streaming():
         print(f"  n_particles:     {batch['n_particles']}")
         print(f"  particles nonzero: {(batch['particles'] != 0).any(axis=-1).sum()}")
 
-        assert batch["particles"].shape[2] == 7, f"Expected 7 features, got {batch['particles'].shape[2]}"
+        assert batch["particles"].shape[2] == 6, f"Expected 6 features, got {batch['particles'].shape[2]}"
         assert batch["mask"].shape == batch["particles"].shape[:2]
         print("[test] HTTPS streaming OK")
         return True
@@ -58,15 +61,15 @@ def test_https_streaming():
 
 def test_model_forward():
     """Test model forward pass with random input."""
-    from ..model.particle_transformer import ParticleTransformer
-    from ..model.config import ModelConfig
+    from model.particle_transformer import ParticleTransformer
+    from model.config import ModelConfig, N_MODEL_FEATURES, N_RAW_FEATURES
 
     cfg = ModelConfig()
     model = ParticleTransformer(cfg=cfg)
     n_params = model.count_parameters()
     print(f"[test] Model: {n_params / 1e6:.2f}M parameters")
 
-    B, N, F = 4, 64, 7
+    B, N, F = 4, 64, N_RAW_FEATURES
     particles = torch.randn(B, N, F)
     mask = torch.ones(B, N)
     mask[:, -10:] = 0  # last 10 are padding
@@ -87,15 +90,15 @@ def test_model_forward():
 
 def test_pretraining_head():
     """Test masked particle modeling loss computation."""
-    from ..model.particle_transformer import ParticleTransformer
-    from ..model.pretraining_head import MaskedParticleModeling
-    from ..model.config import ModelConfig
+    from model.particle_transformer import ParticleTransformer
+    from model.pretraining_head import MaskedParticleModeling
+    from model.config import ModelConfig, N_MODEL_FEATURES, N_RAW_FEATURES
 
     cfg = ModelConfig()
     model = ParticleTransformer(cfg=cfg)
-    head = MaskedParticleModeling(d_model=cfg.d_model, n_features=cfg.n_features)
+    head = MaskedParticleModeling(d_model=cfg.d_model, n_features=N_MODEL_FEATURES)
 
-    B, N, F = 4, 64, 7
+    B, N, F = 4, 64, N_RAW_FEATURES
     particles = torch.randn(B, N, F)
     mask = torch.ones(B, N)
 
@@ -106,7 +109,7 @@ def test_pretraining_head():
     print(f"  masked count:   {is_masked.sum().item()} / {B * N}")
 
     assert loss.item() > 0, "Loss should be > 0"
-    assert preds.shape == (B, N, F)
+    assert preds.shape == (B, N, N_MODEL_FEATURES)
     print("[test] Pretraining head OK")
     return True
 
@@ -117,16 +120,16 @@ def test_gpu_memory():
         print("[test] Skipping GPU memory test (no CUDA)")
         return True
 
-    from ..model.particle_transformer import ParticleTransformer
-    from ..model.pretraining_head import MaskedParticleModeling
-    from ..model.config import ModelConfig
+    from model.particle_transformer import ParticleTransformer
+    from model.pretraining_head import MaskedParticleModeling
+    from model.config import ModelConfig, N_MODEL_FEATURES, N_RAW_FEATURES
 
     torch.cuda.reset_peak_memory_stats()
     cfg = ModelConfig()
     model = ParticleTransformer(cfg=cfg).cuda()
-    head = MaskedParticleModeling(d_model=cfg.d_model, n_features=cfg.n_features).cuda()
+    head = MaskedParticleModeling(d_model=cfg.d_model, n_features=N_MODEL_FEATURES).cuda()
 
-    B, N, F = 16, 64, 7
+    B, N, F = 16, 64, N_RAW_FEATURES
     particles = torch.randn(B, N, F).cuda()
     mask = torch.ones(B, N).cuda()
 

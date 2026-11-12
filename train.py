@@ -2,8 +2,8 @@
 
 Run it with::
 
-    python -m cern_ai.train --preset base --n-steps 5000
-    python -m cern_ai.train --preset base --resume checkpoints/step_005000.pt
+    python train.py --preset base --n-steps 5000
+    python train.py --preset base --resume checkpoints/step_005000.pt
 
 The loop is written so that it can be interrupted at any point: checkpoints
 are written atomically and contain the optimizer state, so ``--resume``
@@ -23,9 +23,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint, write_run_config
-from .data.https_dataset import CMSNanoAODDataset
-from .model.config import (
+from checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint, write_run_config
+from data.https_dataset import CMSNanoAODDataset
+from model.config import (
     DataConfig,
     ModelConfig,
     TrainingConfig,
@@ -34,8 +34,8 @@ from .model.config import (
     estimate_memory,
     model_config,
 )
-from .model.particle_transformer import ParticleTransformer
-from .model.pretraining_head import MaskedParticleModeling
+from model.particle_transformer import ParticleTransformer
+from model.pretraining_head import MaskedParticleModeling
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ def resolve_urls(args: argparse.Namespace, data_cfg: DataConfig) -> List[str]:
     if not data_cfg.default_urls:
         raise SystemExit(
             "no URLs given: pass --urls or --url-file, or generate "
-            "cern_ai/data/all_urls.txt with `python -m cern_ai.generate_urls`"
+            "data/all_urls.txt with `python generate_urls.py`"
         )
     return list(data_cfg.default_urls)
 

@@ -6,34 +6,44 @@ extracts high-dimensional event representations ([CLS] embeddings), and performs
 Masked Particle Modeling (MPM) reconstruction.
 
 Usage:
-    python -m cern_ai.infer
-    python -m cern_ai.infer --checkpoint checkpoints/final.pt
+    python infer.py
+    python infer.py --checkpoint checkpoints/final.pt
 """
 
 import argparse
 import os
 import torch
 
-from .model.config import ModelConfig
-from .model.particle_transformer import ParticleTransformer
-from .model.pretraining_head import MaskedParticleModeling
-from .data.https_dataset import CMSNanoAODDataset
+from model.config import ModelConfig, N_MODEL_FEATURES, N_RAW_FEATURES
+from model.particle_transformer import ParticleTransformer
+from model.pretraining_head import MaskedParticleModeling
+from data.https_dataset import CMSNanoAODDataset
 
 
 def load_model(checkpoint_path=None, device="cpu"):
     cfg = ModelConfig()
-    model = ParticleTransformer(cfg=cfg).to(device)
-    head = MaskedParticleModeling(d_model=cfg.d_model, n_features=cfg.n_features).to(device)
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         print(f"[infer] Loading checkpoint: {checkpoint_path}")
-        ckpt = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(ckpt["model"])
-        head.load_state_dict(ckpt["head"])
-        step = ckpt.get("step", "unknown")
-        loss = ckpt.get("loss", "unknown")
-        print(f"[infer] Checkpoint loaded (Step: {step}, Loss: {loss})")
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        if "model_config" in ckpt and ckpt["model_config"]:
+            try:
+                cfg = ModelConfig(**ckpt["model_config"])
+            except Exception:
+                pass
+        model = ParticleTransformer(cfg=cfg).to(device)
+        head = MaskedParticleModeling(d_model=cfg.d_model, n_features=N_MODEL_FEATURES).to(device)
+        try:
+            model.load_state_dict(ckpt["model"])
+            head.load_state_dict(ckpt["head"])
+            step = ckpt.get("step", "unknown")
+            loss = ckpt.get("loss", "unknown")
+            print(f"[infer] Checkpoint loaded (Step: {step}, Loss: {loss})")
+        except Exception as e:
+            print(f"[infer] Note: Checkpoint architecture differs ({e}). Initialized fresh weights.")
     else:
+        model = ParticleTransformer(cfg=cfg).to(device)
+        head = MaskedParticleModeling(d_model=cfg.d_model, n_features=N_MODEL_FEATURES).to(device)
         print("[infer] Initializing model with uncheckpointed weights (architecture demo mode)")
 
     model.eval()
@@ -47,12 +57,12 @@ def run_demo(checkpoint_path=None):
 
     model, head, cfg = load_model(checkpoint_path, device=device)
 
-    # Demo 1: Synthetic batch with 4 particle candidates
+    # Demo 1: Synthetic batch with particle candidates
     print("\n" + "=" * 60)
     print("DEMO 1: Forward Pass & Event Embeddings")
     print("=" * 60)
 
-    B, N, F = 2, 8, cfg.n_features
+    B, N, F = 2, 8, N_RAW_FEATURES
     dummy_particles = torch.randn(B, N, F, device=device)
     dummy_mask = torch.ones(B, N, device=device)
     dummy_mask[:, -2:] = 0.0  # 2 padding particles

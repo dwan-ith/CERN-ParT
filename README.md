@@ -93,23 +93,26 @@ Targeted for consumer hardware (e.g. laptop GPUs with 6 GB VRAM) while maintaini
 
 ```
 .
-├── cern_ai/
-│   ├── data/
-│   │   ├── all_urls.txt          # 1,382 CERN OpenData CMS NanoAOD ROOT URLs
-│   │   ├── feature_extractor.py  # Branch parsing & kinematic feature engineering
-│   │   └── https_dataset.py      # PyTorch IterableDataset streaming via uproot
-│   ├── model/
-│   │   ├── config.py             # ModelConfig, TrainingConfig, DataConfig
-│   │   ├── particle_transformer.py # ParT with interaction attention & checkpointing
-│   │   └── pretraining_head.py   # Masked Particle Modeling (MPM) objective
-│   ├── tests/
-│   │   └── test_pipeline.py      # End-to-end integration & VRAM verification test
-│   ├── generate_urls.py          # Scraper for CERN OpenData record indices
-│   ├── infer.py                  # Inference, embedding extraction & reconstruction demo
-│   └── train.py                  # Distributed pre-training loop with cosine LR schedule
-├── pyproject.toml                # Package configuration
-├── requirements.txt              # Production dependencies
-├── LICENSE                       # MIT License
+├── data/
+│   ├── all_urls.txt          # 1,382 CERN OpenData CMS NanoAOD ROOT URLs
+│   ├── feature_extractor.py  # Branch parsing & kinematic feature engineering
+│   └── https_dataset.py      # PyTorch IterableDataset streaming via uproot
+├── model/
+│   ├── config.py             # ModelConfig, TrainingConfig, DataConfig
+│   ├── particle_transformer.py # ParT with interaction attention & checkpointing
+│   ├── pretraining_head.py   # Masked Particle Modeling (MPM) objective
+│   └── task_head.py          # Downstream fine-tuning & evaluation heads
+├── tests/
+│   ├── test_pipeline.py      # End-to-end integration & VRAM verification test
+│   ├── test_features.py      # Fast unit tests for branch parsing
+│   └── test_model.py         # Unit tests for ParT kinematics & attention
+├── checkpoint.py             # Atomic checkpoint saving and resumption
+├── generate_urls.py          # Scraper for CERN OpenData record indices
+├── infer.py                  # Inference, embedding extraction & reconstruction demo
+├── train.py                  # Pre-training loop with cosine LR schedule & checkpoints
+├── pyproject.toml            # Package configuration
+├── requirements.txt          # Production dependencies
+├── LICENSE                   # MIT License
 └── README.md
 ```
 
@@ -133,7 +136,7 @@ pip install -e .
 Run the comprehensive end-to-end test suite (fetches a remote CMS NanoAOD file, extracts particle features, performs forward pass, tests MPM loss, and checks GPU VRAM):
 
 ```bash
-python -m cern_ai.tests.test_pipeline
+python tests/test_pipeline.py
 ```
 
 Expected output:
@@ -155,13 +158,18 @@ CERN Foundation Model — Pipeline Test
 ALL TESTS PASSED
 ```
 
+You can also run unit tests with `pytest`:
+```bash
+pytest tests/
+```
+
 ### 3. Run Inference & Embedding Extraction
 
 Extract high-dimensional latent representations for downstream classification or inspect masked particle predictions:
 
 ```bash
 # Uses pre-trained checkpoint if available in checkpoints/final.pt, or architecture mode
-python -m cern_ai.infer
+python infer.py
 ```
 
 ### 4. Self-Supervised Pre-Training
@@ -169,7 +177,7 @@ python -m cern_ai.infer
 To launch the full training loop streaming across the 1,382 CMS NanoAOD collision files:
 
 ```bash
-python -m cern_ai.train --n_steps 5000 --batch_size 16 --lr 3e-4 --mask_ratio 0.15
+python train.py --preset base --n-steps 5000
 ```
 
 ## Dataset & Scientific References

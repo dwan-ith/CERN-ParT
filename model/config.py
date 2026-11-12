@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional, Tuple
 # Feature layout
 # ---------------------------------------------------------------------------
 
-#: Raw per-particle features produced by :mod:`cern_ai.data.feature_extractor`.
+#: Raw per-particle features produced by :mod:`data.feature_extractor`.
 #: ``[pt, eta, phi, mass, charge, type_id]``
 N_RAW_FEATURES = 6
 

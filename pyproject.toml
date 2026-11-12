@@ -3,13 +3,13 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cern-ai"
+name = "cern-part"
 version = "0.1.0"
 description = "Particle Transformer (ParT) Foundation Model streaming CMS NanoAOD via HTTPS"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Antigravity HEP Lab" }]
+authors = [{ name = "dwan-ith" }]
 dependencies = [
     "torch>=2.0.0",
     "uproot>=5.0.0",
@@ -22,4 +22,8 @@ dependencies = [
 dev = [
     "pytest>=7.0",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["data*", "model*", "tests*"]
 

@@ -390,6 +390,21 @@ class ParticleTransformer(nn.Module):
             # ``ff`` is Linear -> GELU -> Dropout -> Linear -> Dropout
             nn.init.normal_(block.ff[3].weight, std=0.02 / math.sqrt(2 * len(self.blocks)))
 
+    def _pad_interaction(self, interaction: torch.Tensor) -> torch.Tensor:
+        """Insert the CLS token into the interaction tensor.
+
+        The CLS token is prepended to the hidden states, so it has to be
+        *prepended* to the interaction tensor as well: a zero row for the
+        CLS query and a zero column for the CLS key.  Appending them at the
+        end instead would silently pair the CLS token with the last
+        particle's interaction features.
+        """
+        B, N, _, F = interaction.shape
+        zeros_row = interaction.new_zeros(B, 1, N, F)
+        interaction = torch.cat([zeros_row, interaction], dim=1)
+        zeros_col = interaction.new_zeros(B, N + 1, 1, F)
+        return torch.cat([zeros_col, interaction], dim=2)
+
     def forward(
         self,
         particles: torch.Tensor,
@@ -426,12 +441,8 @@ class ParticleTransformer(nn.Module):
 
         if interaction is not None:
             # The CLS token has no physical counterpart: its row and column
-            # of interaction features are zero.  The tensor goes from
-            # [B, N, N, F] to [B, N+1, N+1, F].
-            zeros_col = interaction.new_zeros(B, N, 1, interaction.shape[-1])
-            interaction = torch.cat([interaction, zeros_col], dim=2)
-            zeros_row = interaction.new_zeros(B, 1, N + 1, interaction.shape[-1])
-            interaction = torch.cat([interaction, zeros_row], dim=1)
+            # of interaction features are zero.
+            interaction = self._pad_interaction(interaction)
 
         for block in self.blocks:
             if self.cfg.gradient_checkpointing and self.training:

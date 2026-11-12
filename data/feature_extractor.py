@@ -3,14 +3,14 @@
 The extractor is deliberately thin: it knows about branch names and physical
 conventions, and nothing about tensors or models.  It produces *raw* physics
 quantities; normalisation into the model-facing representation happens inside
-the model (see :class:`cern_ai.model.particle_transformer.FeatureNormalizer`)
+the model (see :class:`model.particle_transformer.FeatureNormalizer`)
 so that the data layer stays a faithful copy of what is in the file.
 
 Raw per-particle vector (6 channels)::
 
     [pt, eta, phi, mass, charge, type_id]
 
-``type_id`` indexes :data:`cern_ai.model.config.OBJECT_TYPES`.  The PDG id is
+``type_id`` indexes :data:`model.config.OBJECT_TYPES`.  The PDG id is
 not stored separately: for the resolved object types it is fully determined by
 the type and the charge.
 
