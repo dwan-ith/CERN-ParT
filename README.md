@@ -172,22 +172,6 @@ To launch the full training loop streaming across the 1,382 CMS NanoAOD collisio
 python -m cern_ai.train --n_steps 5000 --batch_size 16 --lr 3e-4 --mask_ratio 0.15
 ```
 
----
-
-## Model Checkpoints
-
-Due to GitHub's 100 MB file size limit, model weights (`*.pt`, ~1.64 GB) are excluded from this git repository. 
-
-To host or download pre-trained weights:
-1. Create a repository on [Hugging Face Model Hub](https://huggingface.co/new).
-2. Upload `checkpoints/final.pt` using the Hugging Face CLI:
-   ```bash
-   huggingface-cli upload dwan-ith/CERN-ParT checkpoints/final.pt final.pt
-   ```
-3. Place downloaded checkpoints in the local `checkpoints/` directory.
-
----
-
 ## Dataset & Scientific References
 
 * **Dataset**: CMS Collaboration. Open Data from the CMS experiment at the LHC. Derived dataset: NanoAOD Run 1 (2010–2012 collision datasets). Available via the [CERN Open Data Portal](https://opendata.cern.ch/).
