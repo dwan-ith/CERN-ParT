@@ -74,7 +74,7 @@ Covering Muons, Electrons, Photons, Jets, and Taus from CMS NanoAOD trees.
 
 ## Hardware & Memory Budget
 
-Targeted for consumer hardware (e.g. laptop GPUs with 6 GB VRAM) while maintaining full foundation model capacity:
+Targeted for low end hardware while maintaining full foundation model capacity:
 
 | Component | Dimensions / Specs | Parameter Count |
 | :--- | :--- | :--- |
@@ -153,7 +153,7 @@ CERN Foundation Model — Pipeline Test
 --- Pretraining head ---
 [test] MPM loss: 1.0263 -> PASS
 --- GPU memory ---
-[test] GPU peak memory: 3.49 GB (of 6 GB available) -> PASS
+[test] GPU peak memory: 3.49 GB -> PASS
 
 ALL TESTS PASSED
 ```
