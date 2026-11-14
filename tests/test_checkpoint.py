@@ -5,7 +5,7 @@ import os
 
 import torch
 
-from checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint
+from checkpoint import latest_checkpoint, load_checkpoint, prune_checkpoints, save_checkpoint
 from model.config import model_config
 from model.particle_transformer import ParticleTransformer
 from model.pretraining_head import MaskedParticleModeling
@@ -93,3 +93,32 @@ def test_latest_checkpoint_prefers_the_highest_step(tmp_path):
 
 def test_latest_checkpoint_returns_none_for_empty_dir(tmp_path):
     assert latest_checkpoint(str(tmp_path)) is None
+
+
+def test_prune_checkpoints_keeps_the_newest(tmp_path):
+    """Checkpoints are gigabytes for the larger presets; old ones must go."""
+    cfg, model, head, optimizer = _build()
+    for step in (100, 200, 300, 400, 500):
+        save_checkpoint(
+            str(tmp_path / f"step_{step:06d}.pt"), step=step, model=model, head=head
+        )
+    prune_checkpoints(str(tmp_path), keep=2)
+    remaining = sorted(p.name for p in tmp_path.glob("step_*.pt"))
+    assert remaining == ["step_000400.pt", "step_000500.pt"]
+
+
+def test_prune_checkpoints_is_a_noop_when_fewer_than_keep(tmp_path):
+    cfg, model, head, optimizer = _build()
+    save_checkpoint(str(tmp_path / "step_000100.pt"), step=100, model=model, head=head)
+    prune_checkpoints(str(tmp_path), keep=5)
+    assert len(list(tmp_path.glob("step_*.pt"))) == 1
+
+
+def test_prune_checkpoints_disabled_with_zero(tmp_path):
+    cfg, model, head, optimizer = _build()
+    for step in (100, 200):
+        save_checkpoint(
+            str(tmp_path / f"step_{step:06d}.pt"), step=step, model=model, head=head
+        )
+    prune_checkpoints(str(tmp_path), keep=0)
+    assert len(list(tmp_path.glob("step_*.pt"))) == 2

@@ -21,7 +21,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint, write_run_config
+from checkpoint import (
+    latest_checkpoint,
+    load_checkpoint,
+    prune_checkpoints,
+    save_checkpoint,
+    write_run_config,
+)
 from data.https_dataset import CMSNanoAODDataset
 from model.config import (
     DataConfig,
@@ -148,6 +154,13 @@ def evaluate_pretraining_loss(
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
+def save_and_report(path: str, **kwargs) -> None:
+    """Save a checkpoint and report how much disk it used."""
+    save_checkpoint(path, **kwargs)
+    size = os.path.getsize(path) / 1e9
+    print(f"  [saved] {path} ({size:.2f} GB)")
+
+
 def train(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
     args = args or parse_args()
 
@@ -365,7 +378,7 @@ def train(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
                     path = os.path.join(
                         train_cfg.checkpoint_dir, f"step_{optimizer_step:06d}.pt"
                     )
-                    save_checkpoint(
+                    save_and_report(
                         path,
                         step=optimizer_step,
                         model=model,
@@ -377,7 +390,7 @@ def train(args: Optional[argparse.Namespace] = None) -> Dict[str, Any]:
                         training_config=train_cfg.to_dict(),
                         save_optimizer=not args.no_save_optimizer,
                     )
-                    print(f"  [saved] {path}")
+                    prune_checkpoints(train_cfg.checkpoint_dir, args.keep_last)
 
                 if (
                     val_dataset is not None
@@ -460,7 +473,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--download-workers", type=int, default=8)
     parser.add_argument("--optimizer", default="adamw", choices=["adamw", "adamw8bit", "sgd"])
-    parser.add_argument("--no-save-optimizer", action="store_true")
+    parser.add_argument("--no-save-optimizer", action="store_true",
+                        help="do not store the optimizer state (much smaller "
+                        "checkpoints, but --resume can no longer continue the "
+                        "optimiser)")
+    parser.add_argument("--keep-last", type=int, default=3,
+                        help="how many step checkpoints to keep on disk")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-interaction", action="store_true", help="ablate the ParT interaction bias")
     parser.add_argument("--seed", type=int, default=0)
@@ -472,6 +490,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="resume from this checkpoint (default: the latest in --out-dir)",
     )
     return parser
+
+
+def main(argv: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Console-script entry point (``cern-train``)."""
+    return train(parse_args(argv))
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:

@@ -83,6 +83,23 @@ def load_checkpoint(
     return payload
 
 
+def prune_checkpoints(directory: str, keep: int) -> None:
+    """Delete all but the ``keep`` most recent ``step_*.pt`` files.
+
+    A checkpoint with the optimizer state is several gigabytes for the larger
+    presets, so keeping every one of them fills a laptop's disk within a few
+    thousand steps. ``keep <= 0`` disables pruning.
+    """
+    if keep <= 0:
+        return
+    candidates = sorted(glob.glob(os.path.join(directory, "step_*.pt")))
+    for path in candidates[:-keep] if len(candidates) > keep else []:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def latest_checkpoint(directory: str) -> Optional[str]:
     """Return the path of the most recent ``step_*.pt`` in ``directory``."""
     if not os.path.isdir(directory):

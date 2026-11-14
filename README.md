@@ -105,10 +105,12 @@ Masked Particle Modelling (MPM): hide part of a particle's properties and ask th
 model to reconstruct them from the rest of the event. Implemented in
 `model/pretraining_head.py`.
 
-### The downstream benchmark
+### Downstream evaluation harness
 
-Per-jet **b-tagging** on `JetHT` + `BTagCSV`, with the DeepFlav score binarised at
-the UL2016-18 medium working point (`0.1530 + 0.0160`). Implemented in `evaluate.py`.
+`evaluate.py` implements a per-jet b-tagging probe with three modes (`scratch`,
+`finetune`, `linear`), sharing data, schedule and head so that the only
+difference between runs is the encoder. It is infrastructure for measuring
+transfer learning, not a headline result — see [Results](#results).
 
 ---
 
@@ -239,7 +241,36 @@ The interaction features are rescaled the same way (`dR/5`, `log1p(kT)`, `z`,
 
 ## Results
 
-<!--RESULTS-->
+### Pretraining converges
+
+`medium` preset (159 M parameters) pretrained for 1500 steps on one JetHT file
+(107 505 events, 9.72 particles per event) streamed over HTTPS:
+
+| step | loss | mask |
+|---|---|---|
+| 50 | 0.0623 | 0.203 |
+| 300 | 0.0325 | 0.166 |
+| 750 | 0.0267 | 0.226 |
+| 1500 | **0.0191** | 0.155 |
+
+For comparison, the earlier version of this project trained on the Run 1
+single-object manifest, where the masking fraction was 0.005 — i.e. less than
+one masked particle per event — and the loss wandered between 30 and 46
+without a trend.
+
+### Note on downstream evaluation
+
+`evaluate.py` implements a per-jet b-tagging probe — train from scratch, or
+fine-tune a pretrained encoder, or freeze it as a linear probe — so that any
+claim about transfer learning made in the future can actually be measured.
+The current published NanoAOD releases contain only **resolved objects**
+(muons, electrons, photons, jets, taus), not the individual particle-flow
+constituents a jet is made of, so a jet is a single particle to the model.
+That setting is underpowered for demonstrating transfer, and no AUC numbers
+are quoted here on purpose: they would read like a result when they are
+merely a measurement on a task with almost no b-discriminating information
+in it. The pretraining curve above, plus the leak-free masking tests, are the
+claims this repository makes for now.
 
 ---
 
@@ -318,13 +349,16 @@ Useful flags:
 Checkpoints contain the model, the head, the optimizer state, the AMP scaler and the
 step counter, so an interrupted run resumes instead of restarting.
 
-### 4. Evaluate
+### 4. Evaluate a downstream task (optional)
 
 ```bash
 python evaluate.py --mode scratch  --preset large   # random init baseline
 python evaluate.py --mode finetune --preset large --checkpoint checkpoints/pt_large/final.pt
 python evaluate.py --mode linear   --preset large --checkpoint checkpoints/pt_large/final.pt
 ```
+
+This b-tagging probe exists to make transfer learning measurable. The
+published data it runs on is underpowered for a real gain — see [Results](#results).
 
 ### 5. Tests
 
@@ -344,13 +378,13 @@ Being explicit about these is more useful than a bigger headline number.
   taus, but not the individual constituents of a jet. The extractor supports packed
   PF candidates when they are present (`has_pf_candidates`), but no currently
   published record provides them.
-- **The b-tagging task is therefore not state of the art.** A jet appears as a single
+- **The b-tagging probe is therefore not state of the art.** A jet appears as a single
   particle among the other event objects, so the classifier is closer to an
-  event-level jet tagger than to a constituent-level one. The meaningful comparison
-  is *pretrained vs. randomly initialised*, not the absolute AUC.
+  event-level jet tagger than to a constituent-level one, and the
+  published data cannot support a serious transfer-learning claim with it.
 - **This is a reproduction, not a new result.** The architecture follows the ParT
   paper. The contributions here are the engineering (streaming, memory, masking
-  correctness) and the honest benchmark.
+  correctness).
 - **One epoch of public data is not a foundation model.** The pretraining runs are
   short by design — they are meant to fit in an afternoon on a laptop, not to
   reproduce a large-scale pretraining campaign.

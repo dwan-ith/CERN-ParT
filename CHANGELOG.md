@@ -52,9 +52,16 @@ fit on a laptop" into "a model that provably fits on a laptop, and trains".
   object type) inside the model.
 - Resume support: checkpoints carry the optimizer state, the AMP scaler and
   the step counter.
-- Local file cache with resumable, validated downloads (`--cache-dir`).
+- Local file cache with resumable, validated downloads (`--cache-dir`), and
+  an event-level cache (extracted padded tensors, ~18 MB per file instead of
+  ~140 MB of ROOT data).
+- At least one masked particle per event in the pretraining objective.
+- Held-out pretraining loss via `--val-url-file` / `--val-every`.
+- Checkpoint pruning (`--keep-last`) so long runs do not fill the disk, and
+  checkpoint size reporting.
 - 61 offline unit tests and 4 integration tests that stream real files.
-- CI workflow, `pyproject.toml` with console scripts, and a rewritten README.
+- CI workflow, `pyproject.toml` with console scripts, `CITATION.cff`, and a
+  rewritten README.
 
 ### Changed
 
